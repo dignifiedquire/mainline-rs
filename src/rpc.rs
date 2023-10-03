@@ -3,6 +3,6 @@ pub struct Rpc {}
 
 impl Rpc {
     pub fn new() -> Self {
-        todo!()
+        Rpc {}
     }
 }

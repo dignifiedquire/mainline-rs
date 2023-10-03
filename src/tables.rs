@@ -5,6 +5,6 @@ pub struct Tables {}
 
 impl Tables {
     pub fn new(max_age: Duration, max: usize) -> Self {
-        todo!()
+        Tables {}
     }
 }

@@ -3,6 +3,6 @@ pub struct Values {}
 
 impl Values {
     pub fn new(max: usize) -> Self {
-        todo!()
+        Values {}
     }
 }

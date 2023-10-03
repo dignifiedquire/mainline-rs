@@ -1,11 +1,15 @@
 use std::time::Duration;
 
+use anyhow::Result;
 use rand::RngCore;
-use records::Records;
-use rpc::Rpc;
-use tables::Tables;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use url::Url;
-use values::Values;
+
+use self::records::Records;
+use self::rpc::Rpc;
+use self::tables::Tables;
+use self::values::Values;
 
 mod records;
 mod rpc;
@@ -19,16 +23,8 @@ const ROTATE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const HASH_LENGTH: usize = 20;
 
 pub struct Dht {
-    tables: Tables,
-    values: Values,
-    peers: Records,
-    rpc: Rpc,
-    secrets: Secrets,
-    host: Option<Url>,
-    listening: bool,
-    destroyed: bool,
-    node_id: [u8; 20],
-    bucket_outdated_time_span: Duration,
+    actor_sender: mpsc::Sender<ActorMessage>,
+    actor_handle: JoinHandle<()>,
 }
 
 pub struct Opts {
@@ -66,13 +62,51 @@ impl Default for Opts {
 }
 
 impl Dht {
-    pub fn new<R: RngCore>(opts: Opts, rng: &mut R) -> Self {
+    pub async fn new<R: RngCore + Send + 'static>(opts: Opts, rng: R) -> Self {
+        let (actor_sender, actor_receiver) = mpsc::channel(64);
+
+        let actor = Actor::new(opts, rng);
+
+        let actor_handle = tokio::task::spawn(async move {
+            actor.run(actor_receiver).await;
+        });
+
+        Dht {
+            actor_sender,
+            actor_handle,
+        }
+    }
+
+    pub async fn shutdown(self) -> Result<()> {
+        self.actor_sender.send(ActorMessage::Shutdown).await.ok();
+        self.actor_handle.await?;
+        Ok(())
+    }
+}
+
+enum ActorMessage {
+    Shutdown,
+}
+
+struct Actor {
+    tables: Tables,
+    values: Values,
+    peers: Records,
+    rpc: Rpc,
+    secrets: Secrets,
+    host: Option<Url>,
+    listening: bool,
+    destroyed: bool,
+    node_id: [u8; 20],
+    bucket_outdated_time_span: Duration,
+    rng: Box<dyn RngCore + Send + 'static>,
+}
+
+impl Actor {
+    fn new<R: RngCore + Send + 'static>(opts: Opts, mut rng: R) -> Self {
         let rpc = Rpc::new();
         // TODO: register "callbacks" to rpc
         // TODO: integrate verify "callback" (probably a trait)
-
-        // TODO: setup interval to trigger secret rotation
-        // every ROTATE_INTERVAL
 
         let node_id = opts.node_id.unwrap_or_else(|| {
             let mut bytes = [0u8; 20];
@@ -80,17 +114,46 @@ impl Dht {
             bytes
         });
 
-        Dht {
+        Actor {
             tables: Tables::new(ROTATE_INTERVAL, opts.max_tables),
             values: Values::new(opts.max_values),
             peers: Records::new(opts.max_age, opts.max_peers),
-            secrets: Secrets::new(rng),
+            secrets: Secrets::new(&mut rng),
             rpc,
             host: opts.host,
             listening: false,
             destroyed: false,
             node_id,
             bucket_outdated_time_span: opts.time_bucket_outdated,
+            rng: Box::new(rng),
+        }
+    }
+
+    async fn run(mut self, mut actor_receiver: mpsc::Receiver<ActorMessage>) {
+        // Setup interval to trigger secret rotation
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + ROTATE_INTERVAL,
+            ROTATE_INTERVAL,
+        );
+
+        loop {
+            tokio::select! {
+                biased;
+
+                Some(msg) = actor_receiver.recv() => {
+                    match msg {
+                        ActorMessage::Shutdown => {
+                            break;
+                        }
+                    }
+                }
+                _ = interval.tick() => {
+                    self.secrets.rotate(&mut self.rng);
+                }
+                else => {
+                    break;
+                }
+            }
         }
     }
 }
@@ -114,5 +177,17 @@ impl Secrets {
     fn rotate<R: RngCore>(&mut self, rng: &mut R) {
         std::mem::swap(&mut self.a, &mut self.b);
         rng.fill_bytes(&mut self.a);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_startup() {
+        let rng = rand::rngs::OsRng::default();
+        let dht = Dht::new(Opts::default(), rng).await;
+        dht.shutdown().await.unwrap();
     }
 }

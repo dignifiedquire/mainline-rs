@@ -8,6 +8,6 @@ pub struct Records {}
 
 impl Records {
     pub fn new(max_age: Option<Duration>, max_peers: usize) -> Self {
-        todo!()
+        Records {}
     }
 }
