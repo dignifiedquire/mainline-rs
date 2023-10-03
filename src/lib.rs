@@ -11,6 +11,7 @@ use self::rpc::Rpc;
 use self::tables::Tables;
 use self::values::Values;
 
+mod kbucket;
 mod records;
 mod rpc;
 mod tables;
@@ -20,7 +21,7 @@ mod values;
 const ROTATE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 // TODO: make Hash generic and configurable, for now just use sha1
-const HASH_LENGTH: usize = 20;
+pub(crate) const HASH_LENGTH: usize = 20;
 
 pub struct Dht {
     actor_sender: mpsc::Sender<ActorMessage>,
@@ -62,19 +63,19 @@ impl Default for Opts {
 }
 
 impl Dht {
-    pub async fn new<R: RngCore + Send + 'static>(opts: Opts, rng: R) -> Self {
+    pub async fn new<R: RngCore + Send + 'static>(opts: Opts, rng: R) -> Result<Self> {
         let (actor_sender, actor_receiver) = mpsc::channel(64);
 
-        let actor = Actor::new(opts, rng);
+        let actor = Actor::new(opts, rng)?;
 
         let actor_handle = tokio::task::spawn(async move {
             actor.run(actor_receiver).await;
         });
 
-        Dht {
+        Ok(Dht {
             actor_sender,
             actor_handle,
-        }
+        })
     }
 
     pub async fn shutdown(self) -> Result<()> {
@@ -103,7 +104,7 @@ struct Actor {
 }
 
 impl Actor {
-    fn new<R: RngCore + Send + 'static>(opts: Opts, mut rng: R) -> Self {
+    fn new<R: RngCore + Send + 'static>(opts: Opts, mut rng: R) -> Result<Self> {
         let rpc = Rpc::new();
         // TODO: register "callbacks" to rpc
         // TODO: integrate verify "callback" (probably a trait)
@@ -114,9 +115,9 @@ impl Actor {
             bytes
         });
 
-        Actor {
-            tables: Tables::new(ROTATE_INTERVAL, opts.max_tables),
-            values: Values::new(opts.max_values),
+        Ok(Actor {
+            tables: Tables::new(ROTATE_INTERVAL, opts.max_tables)?,
+            values: Values::new(opts.max_values)?,
             peers: Records::new(opts.max_age, opts.max_peers),
             secrets: Secrets::new(&mut rng),
             rpc,
@@ -126,7 +127,7 @@ impl Actor {
             node_id,
             bucket_outdated_time_span: opts.time_bucket_outdated,
             rng: Box::new(rng),
-        }
+        })
     }
 
     async fn run(mut self, mut actor_receiver: mpsc::Receiver<ActorMessage>) {
@@ -187,7 +188,7 @@ mod tests {
     #[tokio::test]
     async fn test_startup() {
         let rng = rand::rngs::OsRng::default();
-        let dht = Dht::new(Opts::default(), rng).await;
+        let dht = Dht::new(Opts::default(), rng).await.unwrap();
         dht.shutdown().await.unwrap();
     }
 }
